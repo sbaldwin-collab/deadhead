@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Deadhead · Private jets at empty-leg prices</title>
+<meta name="description" content="Search private jet empty legs from certificated operators. Nearby airports, flexible dates and two-hop connections at a fraction of charter prices.">
+<meta name="theme-color" content="#13202A">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#find" aria-label="Deadhead home">Dead<span>head</span></a>
+    <div class="acct" id="acct"></div>
+  </header>
+
+  <nav class="tabs" aria-label="Sections">
+    <a href="#find" data-view="find">Find a jet</a>
+    <a href="#trips" data-view="trips">My trips <span class="badge" id="b-trips" hidden></span></a>
+    <a href="#operate" data-view="operate">For operators <span class="badge" id="b-op" hidden></span></a>
+    <a href="#admin" data-view="admin" id="nav-admin" hidden>Desk <span class="badge" id="b-admin" hidden></span></a>
+  </nav>
+
+  <main id="main">
+    <!-- FIND -->
+    <section id="v-find" data-v="find">
+      <div class="hero" id="hero">
+        <h1>Private jets flying empty. Seats at a fraction of charter.</h1>
+        <p>Operators post repositioning flights here. Search with nearby airports, flexible dates and two-leg connections, then book the whole aircraft.</p>
+      </div>
+      <form class="search" id="search" autocomplete="off">
+        <div class="f f-from"><label for="from">From</label><input id="from" list="aps" required placeholder="Airport code or name"></div>
+        <div class="f f-to"><label for="to">To</label><input id="to" list="aps" required placeholder="Airport code or name"></div>
+        <div class="f f-date"><label for="date">Depart</label><input id="date" type="date" required></div>
+        <div class="f f-flex"><label for="flex">± Days</label><select id="flex"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>5</option><option>7</option><option>14</option></select></div>
+        <div class="f f-rad"><label for="rad">Radius</label><select id="rad"><option value="0">Exact</option><option value="25">25 mi</option><option value="50" selected>50 mi</option><option value="100">100 mi</option><option value="150">150 mi</option></select></div>
+        <div class="f f-pax"><label for="pax">Pax</label><select id="pax"><option>1</option><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option><option>8</option><option>10</option><option>12</option><option>14</option></select></div>
+        <div class="f f-go"><button class="go" type="submit">Search</button></div>
+        <div class="opts">
+          <label class="chk"><input type="checkbox" id="o-chain" checked> Two-leg connections</label>
+          <label class="chk"><input type="checkbox" id="o-cancel" checked> Include legs that may cancel</label>
+          <label class="chk"><input type="checkbox" id="o-seat"> Show price per seat</label>
+        </div>
+        <datalist id="aps"></datalist>
+      </form>
+      <div class="cols">
+        <section aria-live="polite">
+          <div class="summary">
+            <h2 id="sumtxt">Searching…</h2>
+            <div class="sort" role="group" aria-label="Sort results">
+              <span class="lbl">Sort</span>
+              <button type="button" data-sort="price" aria-pressed="true">Price</button>
+              <button type="button" data-sort="off" aria-pressed="false">% off</button>
+              <button type="button" data-sort="dep" aria-pressed="false">Departure</button>
+            </div>
+          </div>
+          <div class="list" id="list"></div>
+        </section>
+        <aside>
+          <div>
+            <h3>Route alerts</h3>
+            <div class="wl" id="wl"></div>
+            <button type="button" class="btn ghost sm" id="addAlert" style="margin-top:8px">Email me when this route posts</button>
+          </div>
+          <div>
+            <h3>How it finds deals</h3>
+            <ul class="tricks">
+              <li><b><i>EMPTY LEG</i>Ride the repositioning flight</b>A jet that dropped a charter in Palm Beach has to fly home anyway. Operators sell that leg far below charter rates.</li>
+              <li><b><i>NEARBY</i>Use the airport next door</b>A leg into Boca Raton works for Palm Beach. The radius widens both ends and shows the drive.</li>
+              <li><b><i>FLEX</i>Shift a day or two</b>Empty legs follow other people's schedules. A wider window finds more of them.</li>
+              <li><b><i>TWO-LEG</i>Connect two empty legs</b>When no single leg covers your route, two can, through a hub, often from different operators.</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Right now</h3>
+            <div id="stats" class="note">Loading…</div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="v-trips" class="sec" data-v="trips" hidden></section>
+    <section id="v-operate" class="sec" data-v="operate" hidden></section>
+    <section id="v-admin" class="sec" data-v="admin" hidden></section>
+    <section id="v-auth" data-v="auth" hidden></section>
+    <section id="v-account" class="sec" data-v="account" hidden></section>
+    <section id="v-legal" class="legal" data-v="legal" hidden></section>
+  </main>
+
+  <footer>
+    <p id="disclosure">Deadhead is an air charter broker, not a direct air carrier. Every flight is operated by the FAA Part 135 certificated air carrier named on the listing, which exercises full operational control of the aircraft. Prices are set by operators.</p>
+    <p>Empty legs depend on the operator's original trip. If that trip changes, the operator may withdraw the leg; any payment is refunded in full.</p>
+    <p><a href="#terms">Terms</a> · <a href="#privacy">Privacy</a> · <a href="#broker">Broker disclosure</a> <span id="support"></span></p>
+  </footer>
+</div>
+<div id="modalRoot"></div>
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

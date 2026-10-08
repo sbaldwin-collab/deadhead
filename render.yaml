@@ -1,0 +1,35 @@
+# Render Blueprint: one web service with a persistent disk for the SQLite database.
+# New > Blueprint in the Render dashboard, point it at this repository, then fill in the secret values.
+services:
+  - type: web
+    name: deadhead
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_FILE
+        value: /data/deadhead.db
+      - key: TRUST_PROXY
+        value: "1"
+      - key: PLATFORM_FEE_PCT
+        value: "5"
+      - key: CONFIRM_WINDOW_HOURS
+        value: "48"
+      - key: BASE_URL
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: SUPPORT_EMAIL
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
