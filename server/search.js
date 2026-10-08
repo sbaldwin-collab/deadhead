@@ -1,4 +1,4 @@
-import { AP, AIRPORTS, CLASSES, nm, mi, retailFor, legBlock, legRetail } from "./ref.js";
+import { AP, AIRPORTS, CLASSES, nm, mi, retailFor, legBlock, legRetail } from "../public/shared/ref.js";
 
 export const MIN_CONNECTION_MIN = 60;
 export const MAX_CONNECTION_MIN = 26 * 60;

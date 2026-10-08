@@ -1,7 +1,7 @@
-import crypto from "node:crypto";
+import { hmacHex, safeEqual } from "./crypto.js";
 
-// Minimal Stripe REST client (no SDK). Covers exactly what Deadhead uses:
-// Checkout Sessions with manual capture, PaymentIntent capture/cancel, and webhook verification.
+// Minimal Stripe REST client (no SDK): Checkout Sessions with manual capture,
+// PaymentIntent capture/cancel, and webhook signature verification.
 
 function encode(obj, prefix, out = []) {
   for (const [k, v] of Object.entries(obj)) {
@@ -41,8 +41,8 @@ export function makeStripe({ key, base = "https://api.stripe.com" }) {
   };
 }
 
-/** Verify a Stripe-Signature header against the raw request body. Returns the parsed event or throws. */
-export function verifyWebhook(rawBody, header, secret, toleranceSec = 300, now = Date.now()) {
+/** Verify a Stripe-Signature header against the raw body text. Returns the parsed event or throws. */
+export async function verifyWebhook(rawText, header, secret, toleranceSec = 300, now = Date.now()) {
   if (!secret) throw new Error("Webhook secret not configured");
   const parts = Object.create(null); const sigs = [];
   for (const kv of String(header || "").split(",")) {
@@ -52,13 +52,11 @@ export function verifyWebhook(rawBody, header, secret, toleranceSec = 300, now =
   const t = Number(parts.t);
   if (!t || !sigs.length) throw new Error("Malformed signature header");
   if (Math.abs(now / 1000 - t) > toleranceSec) throw new Error("Signature timestamp outside tolerance");
-  const expected = crypto.createHmac("sha256", secret).update(`${t}.${rawBody.toString("utf8")}`).digest("hex");
-  const ok = sigs.some(s => s && s.length === expected.length && crypto.timingSafeEqual(Buffer.from(s), Buffer.from(expected)));
-  if (!ok) throw new Error("Signature mismatch");
-  return JSON.parse(rawBody.toString("utf8"));
+  const expected = await hmacHex(secret, `${t}.${rawText}`);
+  if (!sigs.some(s => s && safeEqual(s, expected))) throw new Error("Signature mismatch");
+  return JSON.parse(rawText);
 }
 
-export function signWebhook(payload, secret, t = Math.floor(Date.now() / 1000)) {
-  const sig = crypto.createHmac("sha256", secret).update(`${t}.${payload}`).digest("hex");
-  return `t=${t},v1=${sig}`;
+export async function signWebhook(payload, secret, t = Math.floor(Date.now() / 1000)) {
+  return `t=${t},v1=${await hmacHex(secret, `${t}.${payload}`)}`;
 }

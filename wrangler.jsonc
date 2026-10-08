@@ -1,0 +1,23 @@
+{
+  // Cloudflare Workers deployment (free plan). The D1 database "deadhead" is created
+  // automatically on first deploy (Wrangler 4.45+ resource provisioning).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "deadhead",
+  "main": "server/worker.js",
+  "compatibility_date": "2025-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/healthz"]
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "deadhead" }
+  ],
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true },
+  "vars": {
+    "BRAND_NAME": "Deadhead",
+    "PLATFORM_FEE_PCT": "5",
+    "CONFIRM_WINDOW_HOURS": "48"
+  }
+}

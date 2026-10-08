@@ -1,15 +1,19 @@
 {
   "name": "deadhead",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Deadhead: empty-leg private jet marketplace",
   "type": "module",
-  "main": "server/index.js",
   "engines": { "node": ">=22.13" },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning server/index.js",
-    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
-    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+    "start": "node --disable-warning=ExperimentalWarning server/node.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/node.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "deploy": "wrangler deploy",
+    "cf:dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.45.0"
   },
   "license": "UNLICENSED"
 }

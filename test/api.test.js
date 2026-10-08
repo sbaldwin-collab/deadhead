@@ -1,11 +1,15 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { createApp } from "../server/app.js";
-import { loadConfig } from "../server/config.js";
-import { signWebhook, verifyWebhook, formEncode } from "../server/stripe.js";
-import { outbox } from "../server/email.js";
-import { localToUtc, AP } from "../server/ref.js";
+import { DatabaseSync } from "node:sqlite";
+import { createApp } from "../server/core.js";
+import { createNodeServer } from "../server/node.js";
+import { configFromEnv } from "../server/config.js";
+import { makeNodeDb, makeD1Db } from "../server/db.js";
+import { makeStripe, signWebhook, verifyWebhook, formEncode } from "../server/stripe.js";
+import { makeMailer, outbox } from "../server/email.js";
+import { hashPassword, verifyPassword } from "../server/crypto.js";
+import { localToUtc, AP } from "../public/shared/ref.js";
 
 const quiet = { info() {}, warn() {}, error: (...a) => console.error(...a) };
 const WHSEC = "whsec_test_123";
@@ -38,27 +42,50 @@ function startStripeMock() {
 }
 
 /* ---------- client with cookie jar ---------- */
+let CURRENT = null; // the booted app, for per-request query counting
 function client(base) {
   let jar = "";
   return async function call(method, path, body, headers = {}) {
+    if (CURRENT) CURRENT.c.n = 0;
     const res = await fetch(base + path, { method, headers: { "Content-Type": "application/json", "X-Requested-With": "deadhead", ...(jar ? { Cookie: jar } : {}), ...headers }, body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body) });
     const sc = res.headers.getSetCookie?.() || [];
     for (const c of sc) { const v = c.split(";")[0]; jar = v.endsWith("=") ? "" : v; }
     const json = await res.json().catch(() => ({}));
+    if (CURRENT) { CURRENT.c.max = Math.max(CURRENT.c.max, CURRENT.c.n); if (CURRENT.c.n > 45) CURRENT.c.worst = `${method} ${path}=${CURRENT.c.n}`; }
     return { status: res.status, ...json };
   };
 }
 
-async function boot(extra) {
-  const cfg = loadConfig({ databaseFile: ":memory:", baseUrl: "http://localhost", adminEmails: ["desk@deadhead.test"], feePct: 5, confirmWindowHours: 48, stripeKey: "", stripeWebhookSecret: WHSEC, ...extra });
-  const app = createApp(cfg, { log: quiet });
-  await new Promise(r => app.server.listen(0, r));
-  app.base = `http://127.0.0.1:${app.server.address().port}`;
-  return app;
+/* A stand-in for Cloudflare D1's binding API, backed by node:sqlite, to exercise makeD1Db. */
+function fakeD1() {
+  const raw = new DatabaseSync(":memory:"); raw.exec("PRAGMA foreign_keys=ON");
+  const stmt = (sql, params = []) => ({ _sql: sql, _p: params, bind: (...p) => stmt(sql, p),
+    all: async () => ({ success: true, results: raw.prepare(sql).all(...params), meta: {} }),
+    first: async () => raw.prepare(sql).get(...params) ?? null,
+    run: async () => ({ success: true, meta: { changes: Number(raw.prepare(sql).run(...params).changes) } }) });
+  return { prepare: sql => stmt(sql), batch: async list => { raw.exec("BEGIN"); try { const out = list.map(s => ({ meta: { changes: Number(raw.prepare(s._sql).run(...s._p).changes) } })); raw.exec("COMMIT"); return out; } catch (e) { raw.exec("ROLLBACK"); throw e; } } };
+}
+/** Counts queries (a batch counts each statement) so tests can enforce D1's 50-per-request cap. */
+function counting(db) {
+  const c = { n: 0, max: 0, worst: "" };
+  const wrapped = { ...db, all: (...a) => (c.n++, db.all(...a)), get: (...a) => (c.n++, db.get(...a)), run: (...a) => (c.n++, db.run(...a)), batch: l => ((c.n += l.length), db.batch(l)), audit: (...a) => (c.n++, db.audit(...a)) };
+  return { db: wrapped, c };
+}
+const backends = { node: () => makeNodeDb(":memory:"), d1: async () => { const d = makeD1Db(fakeD1()); await d.ready(); return d; } };
+
+async function boot(extra = {}, backend = "node") {
+  const cfg = configFromEnv({}, { baseUrl: "http://localhost", adminEmails: ["desk@deadhead.test"], feePct: 5, confirmWindowHours: 48, stripeKey: "", stripeWebhookSecret: WHSEC, ...extra });
+  const { db, c } = counting(await backends[backend]());
+  const app = createApp(cfg, { db, stripe: makeStripe({ key: cfg.stripeKey, base: cfg.stripeApiBase }), mail: makeMailer(cfg, quiet), log: quiet });
+  const server = createNodeServer(app, { log: quiet });
+  await new Promise(r => server.listen(0, r));
+  return { server, db, c, sweep: async () => { c.n = 0; await app.sweep(); c.max = Math.max(c.max, c.n); if (c.n > 45) c.worst = `sweep=${c.n}`; },
+    base: `http://127.0.0.1:${server.address().port}` };
 }
 const future = (days, hhmm = "10:30") => { const d = new Date(Date.now() + days * 864e5); return d.toISOString().slice(0, 10) + "T" + hhmm; };
 
 async function setupMarket(app) {
+  CURRENT = app;
   const desk = client(app.base), op = client(app.base), op2 = client(app.base), trav = client(app.base);
   assert.equal((await desk("POST", "/api/auth/signup", { email: "desk@deadhead.test", password: "correct horse battery", name: "Desk" })).user.admin, true);
   await op("POST", "/api/auth/signup", { email: "ops@northline.test", password: "operator-pass-1", name: "Dana Ops" });
@@ -69,12 +96,16 @@ async function setupMarket(app) {
   return { desk, op, op2, trav };
 }
 
-test("stripe webhook signatures verify and reject tampering", () => {
+test("stripe webhook signatures verify and reject tampering", async () => {
   const payload = JSON.stringify({ id: "evt_1", type: "x" });
-  const header = signWebhook(payload, WHSEC);
-  assert.equal(verifyWebhook(Buffer.from(payload), header, WHSEC).id, "evt_1");
-  assert.throws(() => verifyWebhook(Buffer.from(payload + " "), header, WHSEC), /mismatch/);
-  assert.throws(() => verifyWebhook(Buffer.from(payload), signWebhook(payload, WHSEC, Math.floor(Date.now() / 1000) - 1000), WHSEC), /tolerance/);
+  const header = await signWebhook(payload, WHSEC);
+  assert.equal((await verifyWebhook(payload, header, WHSEC)).id, "evt_1");
+  await assert.rejects(verifyWebhook(payload + " ", header, WHSEC), /mismatch/);
+  await assert.rejects(verifyWebhook(payload, await signWebhook(payload, WHSEC, Math.floor(Date.now() / 1000) - 1000), WHSEC), /tolerance/);
+  const h = await hashPassword("pw-1234567890", { pepper: "pep" });
+  assert.equal(await verifyPassword("pw-1234567890", h, { pepper: "pep" }), true);
+  assert.equal(await verifyPassword("pw-1234567890", h, { pepper: "" }), false);
+  assert.equal(await verifyPassword("wrong-password", h, { pepper: "pep" }), false);
   assert.equal(formEncode({ a: { b: [{ c: 1 }] }, d: "x y" }), "a%5Bb%5D%5B0%5D%5Bc%5D=1&d=x%20y");
 });
 
@@ -84,8 +115,8 @@ test("time zones: local departure converts to UTC across DST", () => {
   assert.equal(new Date(localToUtc("2026-12-01T10:00", AP.KVNY.tz)).toISOString(), "2026-12-01T18:00:00.000Z");
 });
 
-test("request mode: post, verify, search (nearby + two-hop), book, confirm, decline, cancel", async () => {
-  const app = await boot();
+for (const backend of ["node", "d1"]) test(`request mode on ${backend}: post, verify, search (nearby + two-hop), book, confirm, decline, cancel`, async () => {
+  const app = await boot({}, backend);
   try {
     const { desk, op, op2, trav } = await setupMarket(app);
     const anon = client(app.base);
@@ -107,6 +138,7 @@ test("request mode: post, verify, search (nearby + two-hop), book, confirm, decl
     assert.equal((await trav("POST", `/api/admin/operators/${opId}/status`, { status: "verified" })).status, 403, "non-admin can't verify");
     await desk("POST", `/api/admin/operators/${opId}/status`, { status: "verified" });
     await desk("POST", `/api/admin/operators/${op2Id}/status`, { status: "verified" });
+    await app.sweep();
     assert.ok(outbox.some(m => m.to === "jane@flyer.test" && /New empty leg: KHPN → KBCT/.test(m.subject)), "alert email sent");
     assert.equal((await trav("GET", "/api/alerts")).alerts[0].live, 1);
 
@@ -171,7 +203,7 @@ test("request mode: post, verify, search (nearby + two-hop), book, confirm, decl
 
     // Expiry sweep declines stale requests
     const bk4 = await trav("POST", "/api/bookings", { legIds: [a.id], pax: 2, contact: { name: "Jane Flyer", phone: "555-0101", email: "jane@flyer.test" }, accept: true });
-    app.db.run("UPDATE bookings SET expires_at=? WHERE id=?", Date.now() - 1, bk4.booking.id);
+    await app.db.run("UPDATE bookings SET expires_at=? WHERE id=?", Date.now() - 1, bk4.booking.id);
     await app.sweep();
     assert.equal((await trav("GET", "/api/bookings")).bookings.find(x => x.id === bk4.booking.id).status, "declined");
 
@@ -196,12 +228,15 @@ test("request mode: post, verify, search (nearby + two-hop), book, confirm, decl
     // Admin overview totals
     const ov = await desk("GET", "/api/admin/overview");
     assert.equal(ov.totals.confirmed, 1); assert.equal(ov.totals.gmv, 15225); assert.equal(ov.totals.fees, 725);
-  } finally { app.server.close(); }
+    assert.equal(app.c.worst, "", `a request exceeded the query budget: ${app.c.worst}`);
+    assert.ok(app.c.max <= 45, `max queries per request ${app.c.max}`);
+    console.log(`[budget] ${backend}: busiest request used ${app.c.max} queries (limit 50)`);
+  } finally { app.server.close(); CURRENT = null; }
 });
 
 test("stripe mode: checkout with manual capture, webhook authorizes, confirm captures, decline releases", async () => {
   const mock = await startStripeMock();
-  const app = await boot({ stripeKey: "sk_test_x", stripeApiBase: mock.base });
+  const app = await boot({ stripeKey: "sk_test_x", stripeApiBase: mock.base }, "d1");
   try {
     const { desk, op, trav } = await setupMarket(app);
     const opId = (await desk("GET", "/api/admin/overview")).operators.find(o => o.company === "Northline Air").id;
@@ -226,12 +261,12 @@ test("stripe mode: checkout with manual capture, webhook authorizes, confirm cap
     // Customer completes checkout → signed webhook → requested + authorized
     const pi = mock.complete(sess.id);
     const evt = JSON.stringify({ id: "evt_1", type: "checkout.session.completed", data: { object: { id: sess.id, payment_intent: pi, metadata: { booking_id: bk.booking.id } } } });
-    const wh = await fetch(app.base + "/api/stripe/webhook", { method: "POST", headers: { "Stripe-Signature": signWebhook(evt, WHSEC), "Content-Type": "application/json" }, body: evt });
+    const wh = await fetch(app.base + "/api/stripe/webhook", { method: "POST", headers: { "Stripe-Signature": await signWebhook(evt, WHSEC), "Content-Type": "application/json" }, body: evt });
     assert.equal(wh.status, 200);
     let mine = (await trav("GET", "/api/bookings")).bookings[0];
     assert.equal(mine.status, "requested"); assert.equal(mine.payStatus, "authorized");
     // Duplicate webhook delivery is harmless
-    await fetch(app.base + "/api/stripe/webhook", { method: "POST", headers: { "Stripe-Signature": signWebhook(evt, WHSEC) }, body: evt });
+    await fetch(app.base + "/api/stripe/webhook", { method: "POST", headers: { "Stripe-Signature": await signWebhook(evt, WHSEC) }, body: evt });
     assert.equal(outbox.filter(m => m.to === "ops@northline.test" && /New booking request: KVNY/.test(m.subject)).length, 1, "operator notified once");
 
     // Operator confirms → capture
@@ -251,10 +286,21 @@ test("stripe mode: checkout with manual capture, webhook authorizes, confirm cap
 
     // Abandoned checkout is released by the sweeper and the session expired
     const bk3 = await trav("POST", "/api/bookings", { legIds: [leg2.id], pax: 2, contact: { name: "Jane Flyer", phone: "555", email: "jane@flyer.test" }, accept: true });
-    app.db.run("UPDATE bookings SET expires_at=? WHERE id=?", Date.now() - 1, bk3.booking.id);
+    await app.db.run("UPDATE bookings SET expires_at=? WHERE id=?", Date.now() - 1, bk3.booking.id);
     await app.sweep();
     assert.equal((await trav("GET", "/api/bookings")).bookings.find(b => b.id === bk3.booking.id).status, "cancelled");
     assert.equal(mock.sessions[Object.keys(mock.sessions).at(-1)].status, "expired");
     assert.equal((await op("GET", "/api/operator")).legs.find(l => l.id === leg2.id).status, "open");
-  } finally { app.server.close(); mock.srv.close(); }
+    assert.equal(app.c.worst, "", `a request exceeded the query budget: ${app.c.worst}`);
+  } finally { app.server.close(); mock.srv.close(); CURRENT = null; }
+});
+
+test("without ADMIN_EMAILS the first account becomes the desk admin, the second does not", async () => {
+  const app = await boot({ adminEmails: [] }, "d1");
+  try {
+    const a = client(app.base), b = client(app.base);
+    assert.equal((await a("POST", "/api/auth/signup", { email: "owner@x.test", password: "owner-password", name: "Owner" })).user.admin, true);
+    assert.equal((await b("POST", "/api/auth/signup", { email: "someone@x.test", password: "someone-password", name: "Someone" })).user.admin, false);
+    assert.equal((await b("GET", "/api/admin/overview")).status, 403);
+  } finally { app.server.close(); }
 });

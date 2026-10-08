@@ -2,7 +2,12 @@
 
 A marketplace for private-jet empty legs. FAA Part 135 operators post repositioning flights. Travelers search them using nearby airports, flexible dates and two-leg connections, then book the whole aircraft. The card is authorized at booking and charged only when the operator confirms.
 
-It has no dependencies: Node 22 and its built-ins (HTTP server, crypto, SQLite) are all it needs. Stripe and email are called through their REST APIs, so `npm install` isn't required.
+It has no runtime dependencies. The same code runs in two places:
+
+- **Cloudflare Workers + D1 (free).** This is the recommended host: no card, no sleeping, and a scheduled job every minute.
+- **Node 22 + SQLite.** Use it for local development, the tests, and any container host (Dockerfile included).
+
+Stripe and email are called through their REST APIs.
 
 ## What's in it
 
@@ -22,12 +27,34 @@ It has no dependencies: Node 22 and its built-ins (HTTP server, crypto, SQLite) 
 ```bash
 cp .env.example .env          # set ADMIN_EMAILS to your email
 npm start                     # http://localhost:8080
-npm test                      # API + payment-flow tests (mock Stripe)
+npm test                      # API + payment-flow tests on both backends (mock Stripe, mock D1)
 ```
 
-Sign up with the email in `ADMIN_EMAILS` to get the **Desk** tab.
+Sign up with the email in `ADMIN_EMAILS` to get the **Desk** tab. If `ADMIN_EMAILS` is empty, the **first account created** becomes the admin, so sign up right after deploying.
 
-## Deploy (Render, about 15 minutes)
+## Deploy on Cloudflare (free, about 5 minutes)
+
+1. In the Cloudflare dashboard, go to **Workers & Pages → Create → Import a repository**. Connect GitHub and choose this repository.
+2. Keep the project name `deadhead` (it must match `name` in `wrangler.jsonc`). Leave the build command empty; the deploy command is `npx wrangler deploy`.
+3. Click **Deploy**. Wrangler creates the `deadhead` D1 database automatically, uploads `public/`, and registers the one-minute cron. Tables are created on the first request.
+4. Open the `*.workers.dev` URL and **create your account first**: it becomes the desk admin.
+5. Optional, under **Settings → Variables and Secrets**:
+   - `ADMIN_EMAILS`
+   - `SUPPORT_EMAIL`
+   - `PASSWORD_PEPPER`: a long random secret. Set it **before** anyone signs up, and never change it afterwards.
+   - `RESEND_API_KEY` and `EMAIL_FROM`
+   - `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`
+   - `BASE_URL`: only if you want links in emails to use a different domain than the one visitors arrive on.
+6. **Custom domain:** under **Settings → Domains & Routes → Add → Custom domain**.
+
+Every push to `main` redeploys automatically.
+
+**Free-plan limits:**
+- **CPU:** each request gets about 10 ms. Passwords use PBKDF2-SHA256 at 20,000 iterations, sized for that budget, plus an optional pepper. On the $5/month Workers Paid plan you can raise `DEFAULT_ITERATIONS` in `server/crypto.js`; old hashes keep working.
+- **Database queries:** D1 allows 50 per request, and the busiest request here uses 13. The test suite fails if any request goes over 45.
+- **Background work:** the sweep and alert emails run once a minute and are capped per run.
+
+## Deploy on Render (paid; card required)
 
 1. Push this folder to a GitHub repository.
 2. In Render, go to **New → Blueprint**, select the repository, and it reads `render.yaml`. That gives you one web service plus a 1 GB persistent disk at `/data` for the database.
@@ -76,19 +103,20 @@ The database is the single file at `DATABASE_FILE`. Back it up on a schedule, ei
 
 ```
 server/
-  index.js    boot, env checks, 60s sweeper (expire holds/requests), graceful shutdown
-  app.js      routes + booking state machine
-  db.js       SQLite (node:sqlite), WAL, migrations
+  core.js     routes + booking state machine (standard Request → Response)
+  worker.js   Cloudflare entry: API + static assets + cron sweep
+  node.js     Node entry: HTTP server, static files, 60s sweeper
+  db.js       async DB interface; D1 and node:sqlite backends; migrations
   search.js   empty-leg search: radius, flex, two-leg chains
   stripe.js   Stripe REST client + webhook signature verification
   email.js    Resend client (logs when unconfigured)
-  auth.js     scrypt passwords, hashed session tokens
-  http.js     router, cookies, security headers (CSP, HSTS), rate limiter
-  ref.js      airports, aircraft classes, distance/time-zone math (shared with browser)
-public/       single-page site (no build step)
-test/         end-to-end API tests incl. mocked Stripe
+  crypto.js   WebCrypto: PBKDF2 passwords, hashed session tokens, HMAC
+  config.js   env → config
+public/       single-page site (no build step); shared/ref.js = airports, aircraft, time-zone math
+test/         end-to-end API tests on both backends, mocked Stripe, query-budget checks
+wrangler.jsonc  Cloudflare config (D1 binding, assets, cron)
 ```
 
 Booking states: `checkout` (card entry, legs held 35 min) → `requested` (authorized, waiting for operator) → `confirmed` (captured, legs booked). From `checkout` or `requested` a booking can also go to `declined` or `cancelled`, which releases the legs and the card hold.
 
-**Scaling.** This version runs as a single instance with SQLite, which comfortably handles thousands of legs and bookings a day. Move to Postgres and a job queue before running more than one instance. The SQL is plain, and the in-process per-booking lock in `app.js` would become a row lock.
+**Concurrency.** Legs are held with a single conditional `UPDATE … WHERE status='open'` tagged with the booking id, and every state change is conditional on the current status. This stays correct across many Worker instances at once.
